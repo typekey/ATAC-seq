@@ -1,0 +1,512 @@
+#!/bin/bash
+### ---
+### name: 'NFCORE_ATACSEQ:ATACSEQ:MULTIQC (1)'
+### container: '/home/leizheng/data/.singularity/depot.galaxyproject.org-singularity-multiqc-1.13--pyhdfd78af_0.img'
+### outputs:
+### - '*multiqc_report.html'
+### - '*_data'
+### - '*_plots'
+### - 'versions.yml'
+### ...
+set -e
+set -u
+NXF_DEBUG=${NXF_DEBUG:=0}; [[ $NXF_DEBUG > 1 ]] && set -x
+NXF_ENTRY=${1:-nxf_main}
+
+nxf_tree() {
+    local pid=$1
+
+    declare -a ALL_CHILDREN
+    while read P PP;do
+        ALL_CHILDREN[$PP]+=" $P"
+    done < <(ps -e -o pid= -o ppid=)
+
+    pstat() {
+        local x_pid=$1
+        local STATUS=$(2> /dev/null < /proc/$1/status grep -E 'Vm|ctxt')
+
+        if [ $? = 0 ]; then
+        local  x_vsz=$(echo "$STATUS" | grep VmSize | awk '{print $2}' || echo -n '0')
+        local  x_rss=$(echo "$STATUS" | grep VmRSS | awk '{print $2}' || echo -n '0')
+        local x_peak=$(echo "$STATUS" | grep -E 'VmPeak|VmHWM' | sed 's/^.*:\s*//' | sed 's/[\sa-zA-Z]*$//' | tr '\n' ' ' || echo -n '0 0')
+        local x_pmem=$(awk -v rss=$x_rss -v mem_tot=$mem_tot 'BEGIN {printf "%.0f", rss/mem_tot*100*10}' || echo -n '0')
+        local vol_ctxt=$(echo "$STATUS" | grep '\bvoluntary_ctxt_switches' | awk '{print $2}' || echo -n '0')
+        local inv_ctxt=$(echo "$STATUS" | grep '\bnonvoluntary_ctxt_switches' | awk '{print $2}' || echo -n '0')
+        cpu_stat[x_pid]="$x_pid $x_pmem $x_vsz $x_rss $x_peak $vol_ctxt $inv_ctxt"
+        fi
+    }
+
+    pwalk() {
+        pstat $1
+        for i in ${ALL_CHILDREN[$1]:=}; do pwalk $i; done
+    }
+
+    pwalk $1
+}
+
+nxf_stat() {
+    cpu_stat=()
+    nxf_tree $1
+
+    declare -a sum=(0 0 0 0 0 0 0 0)
+    local pid
+    local i
+    for pid in "${!cpu_stat[@]}"; do
+        local row=(${cpu_stat[pid]})
+        [ $NXF_DEBUG = 1 ] && echo "++ stat mem=${row[*]}"
+        for i in "${!row[@]}"; do
+        if [ $i != 0 ]; then
+            sum[i]=$((sum[i]+row[i]))
+        fi
+        done
+    done
+
+    [ $NXF_DEBUG = 1 ] && echo -e "++ stat SUM=${sum[*]}"
+
+    for i in {1..7}; do
+        if [ ${sum[i]} -lt ${cpu_peak[i]} ]; then
+            sum[i]=${cpu_peak[i]}
+        else
+            cpu_peak[i]=${sum[i]}
+        fi
+    done
+
+    [ $NXF_DEBUG = 1 ] && echo -e "++ stat PEAK=${sum[*]}\n"
+    nxf_stat_ret=(${sum[*]})
+}
+
+nxf_mem_watch() {
+    set -o pipefail
+    local pid=$1
+    local trace_file=.command.trace
+    local count=0;
+    declare -a cpu_stat=(0 0 0 0 0 0 0 0)
+    declare -a cpu_peak=(0 0 0 0 0 0 0 0)
+    local mem_tot=$(< /proc/meminfo grep MemTotal | awk '{print $2}')
+    local timeout
+    local DONE
+    local STOP=''
+
+    [ $NXF_DEBUG = 1 ] && nxf_sleep 0.2 && ps fx
+
+    while true; do
+        nxf_stat $pid
+        if [ $count -lt 10 ]; then timeout=1;
+        elif [ $count -lt 120 ]; then timeout=5;
+        else timeout=30;
+        fi
+        read -t $timeout -r DONE || true
+        [[ $DONE ]] && break
+        if [ ! -e /proc/$pid ]; then
+            [ ! $STOP ] && STOP=$(nxf_date)
+            [ $(($(nxf_date)-STOP)) -gt 10000 ] && break
+        fi
+        count=$((count+1))
+    done
+
+    echo "%mem=${nxf_stat_ret[1]}"      >> $trace_file
+    echo "vmem=${nxf_stat_ret[2]}"      >> $trace_file
+    echo "rss=${nxf_stat_ret[3]}"       >> $trace_file
+    echo "peak_vmem=${nxf_stat_ret[4]}" >> $trace_file
+    echo "peak_rss=${nxf_stat_ret[5]}"  >> $trace_file
+    echo "vol_ctxt=${nxf_stat_ret[6]}"  >> $trace_file
+    echo "inv_ctxt=${nxf_stat_ret[7]}"  >> $trace_file
+}
+
+nxf_write_trace() {
+    echo "nextflow.trace/v2"           > $trace_file
+    echo "realtime=$wall_time"         >> $trace_file
+    echo "%cpu=$ucpu"                  >> $trace_file
+    echo "cpu_model=$cpu_model"        >> $trace_file
+    echo "rchar=${io_stat1[0]}"        >> $trace_file
+    echo "wchar=${io_stat1[1]}"        >> $trace_file
+    echo "syscr=${io_stat1[2]}"        >> $trace_file
+    echo "syscw=${io_stat1[3]}"        >> $trace_file
+    echo "read_bytes=${io_stat1[4]}"   >> $trace_file
+    echo "write_bytes=${io_stat1[5]}"  >> $trace_file
+}
+
+nxf_trace_mac() {
+    local start_millis=$(nxf_date)
+
+    /bin/bash -euo pipefail /home/leizheng/workspace/pipeline/ATAC-seq/work/29/cd98173afae1d706adbb3b87093b93/.command.sh
+
+    local end_millis=$(nxf_date)
+    local wall_time=$((end_millis-start_millis))
+    local ucpu=''
+    local cpu_model=''
+    local io_stat1=('' '' '' '' '' '')
+    nxf_write_trace
+}
+
+nxf_fd() {
+    local FD=11
+    while [ -e /proc/$$/fd/$FD ]; do FD=$((FD+1)); done
+    echo $FD
+}
+
+nxf_trace_linux() {
+    local pid=$$
+    command -v ps &>/dev/null || { >&2 echo "Command 'ps' required by nextflow to collect task metrics cannot be found"; exit 1; }
+    local num_cpus=$(< /proc/cpuinfo grep '^processor' -c)
+    local cpu_model=$(< /proc/cpuinfo grep '^model name' | head -n 1 | awk 'BEGIN{FS="\t: "} { print $2 }')
+    local tot_time0=$(grep '^cpu ' /proc/stat | awk '{sum=$2+$3+$4+$5+$6+$7+$8+$9; printf "%.0f",sum}')
+    local cpu_time0=$(2> /dev/null < /proc/$pid/stat awk '{printf "%.0f", ($16+$17)*10 }' || echo -n 'X')
+    local io_stat0=($(2> /dev/null < /proc/$pid/io sed 's/^.*:\s*//' | head -n 6 | tr '\n' ' ' || echo -n '0 0 0 0 0 0'))
+    local start_millis=$(nxf_date)
+    trap 'kill $mem_proc' ERR
+    
+    /bin/bash -euo pipefail /home/leizheng/workspace/pipeline/ATAC-seq/work/29/cd98173afae1d706adbb3b87093b93/.command.sh &
+    local task=$!
+
+    mem_fd=$(nxf_fd)
+    eval "exec $mem_fd> >(nxf_mem_watch $task)"
+    local mem_proc=$!
+
+    wait $task
+
+    local end_millis=$(nxf_date)
+    local tot_time1=$(grep '^cpu ' /proc/stat | awk '{sum=$2+$3+$4+$5+$6+$7+$8+$9; printf "%.0f",sum}')
+    local cpu_time1=$(2> /dev/null < /proc/$pid/stat awk '{printf "%.0f", ($16+$17)*10 }' || echo -n 'X')
+    local ucpu=$(awk -v p1=$cpu_time1 -v p0=$cpu_time0 -v t1=$tot_time1 -v t0=$tot_time0 -v n=$num_cpus 'BEGIN { pct=(p1-p0)/(t1-t0)*100*n; printf("%.0f", pct>0 ? pct : 0) }' )
+
+    local io_stat1=($(2> /dev/null < /proc/$pid/io sed 's/^.*:\s*//' | head -n 6 | tr '\n' ' ' || echo -n '0 0 0 0 0 0'))
+    local i
+    for i in {0..5}; do
+        io_stat1[i]=$((io_stat1[i]-io_stat0[i]))
+    done
+
+    local wall_time=$((end_millis-start_millis))
+    [ $NXF_DEBUG = 1 ] && echo "+++ STATS %CPU=$ucpu TIME=$wall_time I/O=${io_stat1[*]}"
+
+    echo "nextflow.trace/v2"           > $trace_file
+    echo "realtime=$wall_time"         >> $trace_file
+    echo "%cpu=$ucpu"                  >> $trace_file
+    echo "cpu_model=$cpu_model"        >> $trace_file
+    echo "rchar=${io_stat1[0]}"        >> $trace_file
+    echo "wchar=${io_stat1[1]}"        >> $trace_file
+    echo "syscr=${io_stat1[2]}"        >> $trace_file
+    echo "syscw=${io_stat1[3]}"        >> $trace_file
+    echo "read_bytes=${io_stat1[4]}"   >> $trace_file
+    echo "write_bytes=${io_stat1[5]}"  >> $trace_file
+
+    [ -e /proc/$mem_proc ] && eval "echo 'DONE' >&$mem_fd" || true
+    wait $mem_proc 2>/dev/null || true
+    while [ -e /proc/$mem_proc ]; do nxf_sleep 0.1; done
+}
+
+nxf_trace() {
+    local trace_file=.command.trace
+    touch $trace_file
+    if [[ $(uname) = Darwin ]]; then
+        nxf_trace_mac
+    else
+        nxf_trace_linux
+    fi
+}
+nxf_container_env() {
+cat << EOF
+export PYTHONNOUSERSITE="1"
+export R_PROFILE_USER="/.Rprofile"
+export R_ENVIRON_USER="/.Renviron"
+export JULIA_DEPOT_PATH="/usr/local/share/julia"
+export PATH="\$PATH:/home/leizheng/workspace/pipeline/ATAC-seq/bin"
+EOF
+}
+
+nxf_sleep() {
+  sleep $1 2>/dev/null || sleep 1;
+}
+
+nxf_date() {
+    local ts=$(date +%s%3N);
+    if [[ ${#ts} == 10 ]]; then echo ${ts}000
+    elif [[ $ts == *%3N ]]; then echo ${ts/\%3N/000}
+    elif [[ $ts == *3N ]]; then echo ${ts/3N/000}
+    elif [[ ${#ts} == 13 ]]; then echo $ts
+    else echo "Unexpected timestamp value: $ts"; exit 1
+    fi
+}
+
+nxf_env() {
+    echo '============= task environment ============='
+    env | sort | sed "s/\(.*\)AWS\(.*\)=\(.\{6\}\).*/\1AWS\2=\3xxxxxxxxxxxxx/"
+    echo '============= task output =================='
+}
+
+nxf_kill() {
+    declare -a children
+    while read P PP;do
+        children[$PP]+=" $P"
+    done < <(ps -e -o pid= -o ppid=)
+
+    kill_all() {
+        [[ $1 != $$ ]] && kill $1 2>/dev/null || true
+        for i in ${children[$1]:=}; do kill_all $i; done
+    }
+
+    kill_all $1
+}
+
+nxf_mktemp() {
+    local base=${1:-/tmp}
+    mkdir -p "$base"
+    if [[ $(uname) = Darwin ]]; then mktemp -d $base/nxf.XXXXXXXXXX
+    else TMPDIR="$base" mktemp -d -t nxf.XXXXXXXXXX
+    fi
+}
+
+nxf_fs_copy() {
+  local source=$1
+  local target=$2
+  local basedir=$(dirname $1)
+  mkdir -p $target/$basedir
+  cp -fRL $source $target/$basedir
+}
+
+nxf_fs_move() {
+  local source=$1
+  local target=$2
+  local basedir=$(dirname $1)
+  mkdir -p $target/$basedir
+  mv -f $source $target/$basedir
+}
+
+nxf_fs_rsync() {
+  rsync -rRl $1 $2
+}
+
+nxf_fs_rclone() {
+  rclone copyto $1 $2/$1
+}
+
+nxf_fs_fcp() {
+  fcp $1 $2/$1
+}
+
+on_exit() {
+    exit_status=${nxf_main_ret:=$?}
+    printf -- $exit_status > /home/leizheng/workspace/pipeline/ATAC-seq/work/29/cd98173afae1d706adbb3b87093b93/.exitcode
+    set +u
+    exit $exit_status
+}
+
+on_term() {
+    set +e
+    [[ "$pid" ]] && nxf_kill $pid
+}
+
+nxf_launch() {
+    set +u; env - PATH="$PATH" ${TMP:+SINGULARITYENV_TMP="$TMP"} ${TMPDIR:+SINGULARITYENV_TMPDIR="$TMPDIR"} ${NXF_TASK_WORKDIR:+SINGULARITYENV_NXF_TASK_WORKDIR="$NXF_TASK_WORKDIR"} SINGULARITYENV_NXF_DEBUG="${NXF_DEBUG:=0}" singularity exec --no-home --pid -B /home/leizheng/workspace/pipeline/ATAC-seq /home/leizheng/data/.singularity/depot.galaxyproject.org-singularity-multiqc-1.13--pyhdfd78af_0.img /bin/bash -c "cd $NXF_TASK_WORKDIR; eval $(nxf_container_env); /bin/bash /home/leizheng/workspace/pipeline/ATAC-seq/work/29/cd98173afae1d706adbb3b87093b93/.command.run nxf_trace"
+}
+
+nxf_stage() {
+    true
+    # stage input files
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/01/c3ea52d39fa7832b3c121983e50707/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.quality_distribution_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.quality_distribution_metrics
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/48/66148bd0b1a163950eb6ecc725e6be/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.quality_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.quality_by_cycle_metrics
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/57/ddc382900f8ea62b80e95a87951e49/OSMOTIC_STRESS_T0_PE_REP2_T1.Lb.sorted.bam.flagstat alignment/library/OSMOTIC_STRESS_T0_PE_REP2_T1.Lb.sorted.bam.flagstat
+    mkdir -p alignment/merged_replicate/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/82/1687d44f6e75c18e8ddec467874f77/OSMOTIC_STRESS_T0_PE.sorted.MarkDuplicates.metrics.txt alignment/merged_replicate/picard_metrics/OSMOTIC_STRESS_T0_PE.sorted.MarkDuplicates.metrics.txt
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/90/50f8337cdad7ed79e7ba1c02f9d1ac/OSMOTIC_STRESS_T150_SE_REP1.sorted.bam.idxstats alignment/merged_library/filtered/OSMOTIC_STRESS_T150_SE_REP1.sorted.bam.idxstats
+    mkdir -p macs2/merged_library/annotation && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/77/30ea713b708ab379d450fec39c4018/macs2_annotatePeaks.summary_mqc.tsv macs2/merged_library/annotation/macs2_annotatePeaks.summary_mqc.tsv
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/df/770fb9e8f26a3930f287bc022d73f0/OSMOTIC_STRESS_T0_PE_REP1_T1_2.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T0_PE_REP1_T1_2.fastq.gz_trimming_report.txt
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b4/db3747dec3891d5ed150c582421c0b/OSMOTIC_STRESS_T0_PE_REP1.mLb.mkD.sorted.bam.idxstats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T0_PE_REP1.mLb.mkD.sorted.bam.idxstats
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/4a/58fce21a415f310fa91c6bc04b90a8/OSMOTIC_STRESS_T15_PE_REP1.reference_point.plotProfile.tab deeptools/OSMOTIC_STRESS_T15_PE_REP1.reference_point.plotProfile.tab
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/4e/9c7710e82a0d9776297be61bb7fe3b/OSMOTIC_STRESS_T0_PE_REP1.mLb.mkD.sorted.bam.stats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T0_PE_REP1.mLb.mkD.sorted.bam.stats
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/f2/e78d808b6857e3e4022521b351c42e/OSMOTIC_STRESS_T150_SE_REP1.mLb.mkD.sorted.bam.idxstats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T150_SE_REP1.mLb.mkD.sorted.bam.idxstats
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/1e/e1b33efb5d8eefff3f6eb38967aa8b/OSMOTIC_STRESS_T150_SE_REP1_T1_fastqc.zip fastqc/OSMOTIC_STRESS_T150_SE_REP1_T1_fastqc.zip
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/8d/6771f1a0b0632fc46baac05dcbf836/OSMOTIC_STRESS_T150_SE_REP1.plotFingerprint.raw.txt deeptools/OSMOTIC_STRESS_T150_SE_REP1.plotFingerprint.raw.txt
+    mkdir -p macs2/merged_replicate/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/db/a7f63003ebbeefd586aa8a259f09ae/OSMOTIC_STRESS_T0_PE_peaks.count_mqc.tsv macs2/merged_replicate/peaks/OSMOTIC_STRESS_T0_PE_peaks.count_mqc.tsv
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/48/66148bd0b1a163950eb6ecc725e6be/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.quality_distribution_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.quality_distribution_metrics
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/52/1974f1673bdc42021ba5270861e477/OSMOTIC_STRESS_T15_PE_REP1.mLb.mkD.sorted.bam.stats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T15_PE_REP1.mLb.mkD.sorted.bam.stats
+    mkdir -p alignment/merged_library/unfiltered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/97/57872bdadbfaab43f3733ba9926fab/OSMOTIC_STRESS_T100_SE_REP2.mLb.mkD.sorted.MarkDuplicates.metrics.txt alignment/merged_library/unfiltered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP2.mLb.mkD.sorted.MarkDuplicates.metrics.txt
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/23/e220c808f053f75d9918bbf2b57d73/OSMOTIC_STRESS_T100_SE_REP2_T1_trimmed_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T100_SE_REP2_T1_trimmed_fastqc.zip
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/df/770fb9e8f26a3930f287bc022d73f0/OSMOTIC_STRESS_T0_PE_REP1_T1_1.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T0_PE_REP1_T1_1.fastq.gz_trimming_report.txt
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/e8/f045e60658fcb22a1ba9dac5daea30/OSMOTIC_STRESS_T0_PE_REP2.sorted.bam.idxstats alignment/merged_library/filtered/OSMOTIC_STRESS_T0_PE_REP2.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/dc/01b9417788568a907413654e91f34f/OSMOTIC_STRESS_T150_SE_REP1.CollectMultipleMetrics.base_distribution_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T150_SE_REP1.CollectMultipleMetrics.base_distribution_by_cycle_metrics
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/36/0caaeb1c0dccb20da344fbb922dc27/OSMOTIC_STRESS_T100_SE_REP2.plotFingerprint.raw.txt deeptools/OSMOTIC_STRESS_T100_SE_REP2.plotFingerprint.raw.txt
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/c5/a833fafbe47ebb053ffeb9efaddf25/OSMOTIC_STRESS_T100_SE_REP2_T1_fastqc.zip fastqc/OSMOTIC_STRESS_T100_SE_REP2_T1_fastqc.zip
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/30/eb9f205dc67c820461ac9dfaff1ac0/OSMOTIC_STRESS_T100_SE_REP2.CollectMultipleMetrics.alignment_summary_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP2.CollectMultipleMetrics.alignment_summary_metrics
+    mkdir -p alignment/merged_replicate && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/53/9b0c5fa56f7ba4d85a85921b689dae/OSMOTIC_STRESS_T0_PE.sorted.bam.flagstat alignment/merged_replicate/OSMOTIC_STRESS_T0_PE.sorted.bam.flagstat
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/a1/1f47c2c0fdb85e3e88ed3cd23af03d/OSMOTIC_STRESS_T0_PE_REP2.reference_point.plotProfile.tab deeptools/OSMOTIC_STRESS_T0_PE_REP2.reference_point.plotProfile.tab
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b3/38bebae54ec24cb0dd9ffe6e328ba6/OSMOTIC_STRESS_T15_PE_REP1_T1_1_fastqc.zip fastqc/OSMOTIC_STRESS_T15_PE_REP1_T1_1_fastqc.zip
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/a3/32b80007d4326366251d43afc99499/OSMOTIC_STRESS_T0_PE_REP2_T1.Lb.sorted.bam.stats alignment/library/OSMOTIC_STRESS_T0_PE_REP2_T1.Lb.sorted.bam.stats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/dc/01b9417788568a907413654e91f34f/OSMOTIC_STRESS_T150_SE_REP1.CollectMultipleMetrics.quality_distribution_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T150_SE_REP1.CollectMultipleMetrics.quality_distribution_metrics
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/d2/b284a17f0846c53ee3b1b47eeb9e40/OSMOTIC_STRESS_T100_SE_REP1.sorted.bam.stats alignment/merged_library/filtered/OSMOTIC_STRESS_T100_SE_REP1.sorted.bam.stats
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/0d/aabb47c6dc624aceafe52175c245d1/OSMOTIC_STRESS_T0_PE_REP2_T1_2_val_2_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T0_PE_REP2_T1_2_val_2_fastqc.zip
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/c8/2d7ec998337b32941b71c2527f4111/OSMOTIC_STRESS_T150_SE_REP1.mLb.mkD.sorted.bam.flagstat alignment/merged_library/unfiltered/OSMOTIC_STRESS_T150_SE_REP1.mLb.mkD.sorted.bam.flagstat
+    mkdir -p alignment/merged_replicate && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/2d/236730ba27fb0d32a3dae1579b7e39/OSMOTIC_STRESS_T100_SE.sorted.bam.flagstat alignment/merged_replicate/OSMOTIC_STRESS_T100_SE.sorted.bam.flagstat
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/1f/8b362b70fc7f7b9085a89a2045168d/OSMOTIC_STRESS_T0_PE_REP2_T1.Lb.sorted.bam.idxstats alignment/library/OSMOTIC_STRESS_T0_PE_REP2_T1.Lb.sorted.bam.idxstats
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/9c/74b3bdc74d53e28ba2094949d6bc4a/OSMOTIC_STRESS_T150_SE_REP1_T1.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T150_SE_REP1_T1.fastq.gz_trimming_report.txt
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b8/7e539c33395e5997e1ac1a2ef4a64e/OSMOTIC_STRESS_T100_SE_REP2.sorted.bam.idxstats alignment/merged_library/filtered/OSMOTIC_STRESS_T100_SE_REP2.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/31/17040350d8c8f9229d1003e9b41266/OSMOTIC_STRESS_T0_PE_REP1.sorted.bam.idxstats alignment/merged_library/filtered/OSMOTIC_STRESS_T0_PE_REP1.sorted.bam.idxstats
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/da/b688368d47a7a42649d2b342f4e41d/OSMOTIC_STRESS_T0_PE_REP1_T1_1_fastqc.zip fastqc/OSMOTIC_STRESS_T0_PE_REP1_T1_1_fastqc.zip
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/90/fd0b778e905e18d05f164cdbab08d3/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.quality_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.quality_by_cycle_metrics
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/df/770fb9e8f26a3930f287bc022d73f0/OSMOTIC_STRESS_T0_PE_REP1_T1_2_val_2_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T0_PE_REP1_T1_2_val_2_fastqc.zip
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/a7/0aa6859a705e1e63152333e7e6b25a/OSMOTIC_STRESS_T0_PE_REP2.sorted.bam.flagstat alignment/merged_library/filtered/OSMOTIC_STRESS_T0_PE_REP2.sorted.bam.flagstat
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/fc/2f558d33fd570fe1c1740919f3f99c/OSMOTIC_STRESS_T0_PE_REP2.sorted.bam.stats alignment/merged_library/filtered/OSMOTIC_STRESS_T0_PE_REP2.sorted.bam.stats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/01/c3ea52d39fa7832b3c121983e50707/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.alignment_summary_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.alignment_summary_metrics
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/eb/69e6f57984cb7bf691f1daf0a267b9/OSMOTIC_STRESS_T100_SE_REP2_peaks.FRiP_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T100_SE_REP2_peaks.FRiP_mqc.tsv
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b1/4e024d7d756eda73dc06aec06df821/OSMOTIC_STRESS_T15_PE_REP1_peaks.FRiP_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T15_PE_REP1_peaks.FRiP_mqc.tsv
+    mkdir -p deseq2_replicate && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/67/1673faca919c92af414dd94e0a5e2a/consensus_peaks.pca.vals_mqc.tsv deseq2_replicate/consensus_peaks.pca.vals_mqc.tsv
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b6/ca05d1dc41ced9771a3cf362b269d1/OSMOTIC_STRESS_T100_SE_REP1.CollectMultipleMetrics.quality_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP1.CollectMultipleMetrics.quality_by_cycle_metrics
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/e0/b30fdb45e2b21729b9a1f6ce45b019/OSMOTIC_STRESS_T150_SE_REP1_T2_trimmed_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T150_SE_REP1_T2_trimmed_fastqc.zip
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/0d/aabb47c6dc624aceafe52175c245d1/OSMOTIC_STRESS_T0_PE_REP2_T1_1.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T0_PE_REP2_T1_1.fastq.gz_trimming_report.txt
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/69/5ab531f19bafa9fe30ea03070e63c9/OSMOTIC_STRESS_T15_PE_REP1_T1_2.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T15_PE_REP1_T1_2.fastq.gz_trimming_report.txt
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/36/39e5f5dc4b0a1af7d93f20cfa4a261/OSMOTIC_STRESS_T100_SE_REP1_T1.Lb.sorted.bam.flagstat alignment/library/OSMOTIC_STRESS_T100_SE_REP1_T1.Lb.sorted.bam.flagstat
+    mkdir -p macs2/merged_replicate/featurecounts && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b9/b36e0bc03df4567b001f30ffb8a566/consensus_peaks.featureCounts.txt.summary macs2/merged_replicate/featurecounts/consensus_peaks.featureCounts.txt.summary
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/e0/10f04dac782540a6d3b21894ad99f0/OSMOTIC_STRESS_T15_PE_REP1_T2.Lb.sorted.bam.stats alignment/library/OSMOTIC_STRESS_T15_PE_REP1_T2.Lb.sorted.bam.stats
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/18/343670b675788d0bf5d7c1e3d295b9/OSMOTIC_STRESS_T150_SE_REP1_T2.Lb.sorted.bam.flagstat alignment/library/OSMOTIC_STRESS_T150_SE_REP1_T2.Lb.sorted.bam.flagstat
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b6/ca05d1dc41ced9771a3cf362b269d1/OSMOTIC_STRESS_T100_SE_REP1.CollectMultipleMetrics.quality_distribution_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP1.CollectMultipleMetrics.quality_distribution_metrics
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/4e/554d1dcc25dbd831cca7079f045df4/OSMOTIC_STRESS_T100_SE_REP2.mLb.mkD.sorted.bam.idxstats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T100_SE_REP2.mLb.mkD.sorted.bam.idxstats
+    mkdir -p alignment/merged_replicate && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/6a/b013d21bd3b81bb5137d288cb56323/OSMOTIC_STRESS_T0_PE.sorted.bam.idxstats alignment/merged_replicate/OSMOTIC_STRESS_T0_PE.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/69/6899fb561d3be973b63d47b129bc2b/OSMOTIC_STRESS_T100_SE_REP1.sorted.bam.idxstats alignment/merged_library/filtered/OSMOTIC_STRESS_T100_SE_REP1.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/30/eb9f205dc67c820461ac9dfaff1ac0/OSMOTIC_STRESS_T100_SE_REP2.CollectMultipleMetrics.quality_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP2.CollectMultipleMetrics.quality_by_cycle_metrics
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/1c/704bb878dba6388b72804fa441e662/OSMOTIC_STRESS_T0_PE_REP1_peaks.FRiP_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T0_PE_REP1_peaks.FRiP_mqc.tsv
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ae/1cd618a447e6287e393298a14ba4bb/OSMOTIC_STRESS_T100_SE_REP1_T1_fastqc.zip fastqc/OSMOTIC_STRESS_T100_SE_REP1_T1_fastqc.zip
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/48/66148bd0b1a163950eb6ecc725e6be/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.base_distribution_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.base_distribution_by_cycle_metrics
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/95/617ff897089d3a6533b1e8474f096f/OSMOTIC_STRESS_T0_PE_REP1_T1.Lb.sorted.bam.stats alignment/library/OSMOTIC_STRESS_T0_PE_REP1_T1.Lb.sorted.bam.stats
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b3/166def8ddcc12ad89d61ab5d704b51/OSMOTIC_STRESS_T150_SE_REP1_peaks.FRiP_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T150_SE_REP1_peaks.FRiP_mqc.tsv
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b3/166def8ddcc12ad89d61ab5d704b51/OSMOTIC_STRESS_T150_SE_REP1_peaks.count_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T150_SE_REP1_peaks.count_mqc.tsv
+    mkdir -p alignment/merged_library/unfiltered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/c4/6df908302a6f803fa44cf18f699ed8/OSMOTIC_STRESS_T150_SE_REP1.mLb.mkD.sorted.MarkDuplicates.metrics.txt alignment/merged_library/unfiltered/picard_metrics/OSMOTIC_STRESS_T150_SE_REP1.mLb.mkD.sorted.MarkDuplicates.metrics.txt
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/30/eb9f205dc67c820461ac9dfaff1ac0/OSMOTIC_STRESS_T100_SE_REP2.CollectMultipleMetrics.base_distribution_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP2.CollectMultipleMetrics.base_distribution_by_cycle_metrics
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/48/66148bd0b1a163950eb6ecc725e6be/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.insert_size_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.insert_size_metrics
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/f8/2d409ef857bcbf14b62c767c1be15d/OSMOTIC_STRESS_T150_SE_REP1_T1.Lb.sorted.bam.stats alignment/library/OSMOTIC_STRESS_T150_SE_REP1_T1.Lb.sorted.bam.stats
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/17/133a9c13d065fd161a5ce7dafdeaaf/OSMOTIC_STRESS_T0_PE_REP1.sorted.bam.flagstat alignment/merged_library/filtered/OSMOTIC_STRESS_T0_PE_REP1.sorted.bam.flagstat
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/07/ef10417aa2c3ce4f923a849b4c0d12/OSMOTIC_STRESS_T0_PE_REP2.mLb.mkD.sorted.bam.flagstat alignment/merged_library/unfiltered/OSMOTIC_STRESS_T0_PE_REP2.mLb.mkD.sorted.bam.flagstat
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/28/7cc1c8c507dab38fa7e73ab4f6614b/OSMOTIC_STRESS_T15_PE_REP1.mLb.mkD.sorted.bam.flagstat alignment/merged_library/unfiltered/OSMOTIC_STRESS_T15_PE_REP1.mLb.mkD.sorted.bam.flagstat
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/6a/e29237d0061d66f4cb3b4e5150f59a/OSMOTIC_STRESS_T15_PE_REP1_T2_1_val_1_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T15_PE_REP1_T2_1_val_1_fastqc.zip
+    mkdir -p deseq2_library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/76/9ed9807a7d76aea8ca01ffa1029487/consensus_peaks.pca.vals_mqc.tsv deseq2_library/consensus_peaks.pca.vals_mqc.tsv
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/69/5ab531f19bafa9fe30ea03070e63c9/OSMOTIC_STRESS_T15_PE_REP1_T1_1.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T15_PE_REP1_T1_1.fastq.gz_trimming_report.txt
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/a4/c8af9ddffc33ef47f01993bf709248/OSMOTIC_STRESS_T150_SE_REP1_T1.Lb.sorted.bam.flagstat alignment/library/OSMOTIC_STRESS_T150_SE_REP1_T1.Lb.sorted.bam.flagstat
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ce/daab5a64e85e0196effd1170e03b96/OSMOTIC_STRESS_T100_SE_REP1_T1_trimmed_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T100_SE_REP1_T1_trimmed_fastqc.zip
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/90/fd0b778e905e18d05f164cdbab08d3/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.base_distribution_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.base_distribution_by_cycle_metrics
+    ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/tmp/6a/2fcedd823d727543a2318e248908dc/workflow_summary_mqc.yaml workflow_summary_mqc.yaml
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b9/0fe6347bc0da12458554d04e0378ad/OSMOTIC_STRESS_T150_SE_REP1_T2.Lb.sorted.bam.stats alignment/library/OSMOTIC_STRESS_T150_SE_REP1_T2.Lb.sorted.bam.stats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b6/ca05d1dc41ced9771a3cf362b269d1/OSMOTIC_STRESS_T100_SE_REP1.CollectMultipleMetrics.alignment_summary_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP1.CollectMultipleMetrics.alignment_summary_metrics
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ee/5fb3a7f93ca53da4dd89a74b618baf/OSMOTIC_STRESS_T15_PE_REP1_T1.Lb.sorted.bam.idxstats alignment/library/OSMOTIC_STRESS_T15_PE_REP1_T1.Lb.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/69/afc79a8e0e0c9f8f7b4dc683fc8074/OSMOTIC_STRESS_T0_PE_REP1.mLb.mkD.sorted.bam.flagstat alignment/merged_library/unfiltered/OSMOTIC_STRESS_T0_PE_REP1.mLb.mkD.sorted.bam.flagstat
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/24/788db6fbe5af9622e8149df3974706/OSMOTIC_STRESS_T150_SE_REP1.sorted.bam.flagstat alignment/merged_library/filtered/OSMOTIC_STRESS_T150_SE_REP1.sorted.bam.flagstat
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/91/a60895184900d1364afbf4e2471dca/OSMOTIC_STRESS_T15_PE_REP1.sorted.bam.flagstat alignment/merged_library/filtered/OSMOTIC_STRESS_T15_PE_REP1.sorted.bam.flagstat
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/af/3839f965badbb737c6477a4515e6c8/OSMOTIC_STRESS_T100_SE_REP2_T1.Lb.sorted.bam.flagstat alignment/library/OSMOTIC_STRESS_T100_SE_REP2_T1.Lb.sorted.bam.flagstat
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/6a/e29237d0061d66f4cb3b4e5150f59a/OSMOTIC_STRESS_T15_PE_REP1_T2_1.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T15_PE_REP1_T2_1.fastq.gz_trimming_report.txt
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/01/c3ea52d39fa7832b3c121983e50707/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.insert_size_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.insert_size_metrics
+    ln -s /home/leizheng/workspace/pipeline/ATAC-seq/assets/multiqc_config.yml multiqc_config.yml
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/4d/2cfdbbe3fa0fa09385b8409aa31ead/OSMOTIC_STRESS_T100_SE_REP1.reference_point.plotProfile.tab deeptools/OSMOTIC_STRESS_T100_SE_REP1.reference_point.plotProfile.tab
+    mkdir -p macs2/merged_replicate/annotation && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/69/60647a4f39dff2cffc4aaeda08aed7/macs2_annotatePeaks.summary_mqc.tsv macs2/merged_replicate/annotation/macs2_annotatePeaks.summary_mqc.tsv
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/df/770fb9e8f26a3930f287bc022d73f0/OSMOTIC_STRESS_T0_PE_REP1_T1_1_val_1_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T0_PE_REP1_T1_1_val_1_fastqc.zip
+    mkdir -p macs2/merged_library/featurecounts && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/94/92d0d0451072539cd0a1c3754be22f/consensus_peaks.featureCounts.txt.summary macs2/merged_library/featurecounts/consensus_peaks.featureCounts.txt.summary
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/6a/e29237d0061d66f4cb3b4e5150f59a/OSMOTIC_STRESS_T15_PE_REP1_T2_2.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T15_PE_REP1_T2_2.fastq.gz_trimming_report.txt
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/56/97b2a350fd40f6f981c0836f9a4ba6/OSMOTIC_STRESS_T0_PE_REP1.sorted.bam.stats alignment/merged_library/filtered/OSMOTIC_STRESS_T0_PE_REP1.sorted.bam.stats
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b3/38bebae54ec24cb0dd9ffe6e328ba6/OSMOTIC_STRESS_T15_PE_REP1_T1_2_fastqc.zip fastqc/OSMOTIC_STRESS_T15_PE_REP1_T1_2_fastqc.zip
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/30/eb9f205dc67c820461ac9dfaff1ac0/OSMOTIC_STRESS_T100_SE_REP2.CollectMultipleMetrics.quality_distribution_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP2.CollectMultipleMetrics.quality_distribution_metrics
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ae/798f3a467364feb11a7afe2a48d19e/OSMOTIC_STRESS_T100_SE_REP2.reference_point.plotProfile.tab deeptools/OSMOTIC_STRESS_T100_SE_REP2.reference_point.plotProfile.tab
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/42/e70f15921b967c8d941f09e317bbad/OSMOTIC_STRESS_T0_PE_REP2_peaks.FRiP_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T0_PE_REP2_peaks.FRiP_mqc.tsv
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/5e/cee6b416a5cbca8835b969f1f71333/OSMOTIC_STRESS_T15_PE_REP1_T2.Lb.sorted.bam.flagstat alignment/library/OSMOTIC_STRESS_T15_PE_REP1_T2.Lb.sorted.bam.flagstat
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/cd/d244ee70e7b2946b185e7a4e3a2143/OSMOTIC_STRESS_T15_PE_REP1.sorted.bam.idxstats alignment/merged_library/filtered/OSMOTIC_STRESS_T15_PE_REP1.sorted.bam.idxstats
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/eb/69e6f57984cb7bf691f1daf0a267b9/OSMOTIC_STRESS_T100_SE_REP2_peaks.count_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T100_SE_REP2_peaks.count_mqc.tsv
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/69/5ab531f19bafa9fe30ea03070e63c9/OSMOTIC_STRESS_T15_PE_REP1_T1_1_val_1_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T15_PE_REP1_T1_1_val_1_fastqc.zip
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/5f/7bd7e19852b9ff9b35c63fae8ac96c/OSMOTIC_STRESS_T15_PE_REP1_T2.Lb.sorted.bam.idxstats alignment/library/OSMOTIC_STRESS_T15_PE_REP1_T2.Lb.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/unfiltered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/c4/e669386cacd5fd8b102b11fe1f87d9/OSMOTIC_STRESS_T100_SE_REP1.mLb.mkD.sorted.MarkDuplicates.metrics.txt alignment/merged_library/unfiltered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP1.mLb.mkD.sorted.MarkDuplicates.metrics.txt
+    mkdir -p macs2/merged_replicate/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/d9/9690b8868fb524aed4258d4396d615/OSMOTIC_STRESS_T100_SE_peaks.count_mqc.tsv macs2/merged_replicate/peaks/OSMOTIC_STRESS_T100_SE_peaks.count_mqc.tsv
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ce/daab5a64e85e0196effd1170e03b96/OSMOTIC_STRESS_T100_SE_REP1_T1.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T100_SE_REP1_T1.fastq.gz_trimming_report.txt
+    mkdir -p deseq2_replicate && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/67/1673faca919c92af414dd94e0a5e2a/consensus_peaks.sample.dists_mqc.tsv deseq2_replicate/consensus_peaks.sample.dists_mqc.tsv
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ac/ac334224a926feaa691ea704f0605a/OSMOTIC_STRESS_T100_SE_REP1_peaks.count_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T100_SE_REP1_peaks.count_mqc.tsv
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b1/4e024d7d756eda73dc06aec06df821/OSMOTIC_STRESS_T15_PE_REP1_peaks.count_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T15_PE_REP1_peaks.count_mqc.tsv
+    mkdir -p macs2/merged_replicate/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/db/a7f63003ebbeefd586aa8a259f09ae/OSMOTIC_STRESS_T0_PE_peaks.FRiP_mqc.tsv macs2/merged_replicate/peaks/OSMOTIC_STRESS_T0_PE_peaks.FRiP_mqc.tsv
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/49/39e8bf09b63de11b3c9198487e4446/OSMOTIC_STRESS_T0_PE_REP1_T1.Lb.sorted.bam.flagstat alignment/library/OSMOTIC_STRESS_T0_PE_REP1_T1.Lb.sorted.bam.flagstat
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/6a/e29237d0061d66f4cb3b4e5150f59a/OSMOTIC_STRESS_T15_PE_REP1_T2_2_val_2_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T15_PE_REP1_T2_2_val_2_fastqc.zip
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/43/c9a01c572341918794b3a3c17f8ce6/OSMOTIC_STRESS_T100_SE_REP2.sorted.bam.stats alignment/merged_library/filtered/OSMOTIC_STRESS_T100_SE_REP2.sorted.bam.stats
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/4c/c024c735badc45faf5045aff7c46cf/OSMOTIC_STRESS_T100_SE_REP1_T1.Lb.sorted.bam.stats alignment/library/OSMOTIC_STRESS_T100_SE_REP1_T1.Lb.sorted.bam.stats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/dc/01b9417788568a907413654e91f34f/OSMOTIC_STRESS_T150_SE_REP1.CollectMultipleMetrics.alignment_summary_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T150_SE_REP1.CollectMultipleMetrics.alignment_summary_metrics
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ef/ce12f32ed1b02e1f8c23b2040e9d80/OSMOTIC_STRESS_T100_SE_REP2_T1.Lb.sorted.bam.idxstats alignment/library/OSMOTIC_STRESS_T100_SE_REP2_T1.Lb.sorted.bam.idxstats
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/a0/081e1bced2d9c73e39dd7d16bbb422/OSMOTIC_STRESS_T15_PE_REP1_T2_1_fastqc.zip fastqc/OSMOTIC_STRESS_T15_PE_REP1_T2_1_fastqc.zip
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/9d/5df37a9ee9c0ec0928282b5f37db30/OSMOTIC_STRESS_T15_PE_REP1_T1.Lb.sorted.bam.stats alignment/library/OSMOTIC_STRESS_T15_PE_REP1_T1.Lb.sorted.bam.stats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/48/66148bd0b1a163950eb6ecc725e6be/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.alignment_summary_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T15_PE_REP1.CollectMultipleMetrics.alignment_summary_metrics
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/01/c3ea52d39fa7832b3c121983e50707/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.quality_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.quality_by_cycle_metrics
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/3b/bf68361d23b4c96fb7a4289c1b3d76/OSMOTIC_STRESS_T15_PE_REP1.plotFingerprint.raw.txt deeptools/OSMOTIC_STRESS_T15_PE_REP1.plotFingerprint.raw.txt
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b1/f679532fd384c3265c70d553a7af67/OSMOTIC_STRESS_T100_SE_REP1.mLb.mkD.sorted.bam.idxstats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T100_SE_REP1.mLb.mkD.sorted.bam.idxstats
+    mkdir -p alignment/merged_replicate && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/fa/66dda7dba5ec4c13e9466a293df941/OSMOTIC_STRESS_T0_PE.sorted.bam.stats alignment/merged_replicate/OSMOTIC_STRESS_T0_PE.sorted.bam.stats
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ac/ac334224a926feaa691ea704f0605a/OSMOTIC_STRESS_T100_SE_REP1_peaks.FRiP_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T100_SE_REP1_peaks.FRiP_mqc.tsv
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/da/b688368d47a7a42649d2b342f4e41d/OSMOTIC_STRESS_T0_PE_REP1_T1_2_fastqc.zip fastqc/OSMOTIC_STRESS_T0_PE_REP1_T1_2_fastqc.zip
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/9c/74b3bdc74d53e28ba2094949d6bc4a/OSMOTIC_STRESS_T150_SE_REP1_T1_trimmed_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T150_SE_REP1_T1_trimmed_fastqc.zip
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/9b/0fdc7a5e98e93366ffeabf007027db/OSMOTIC_STRESS_T0_PE_REP1_T1.Lb.sorted.bam.idxstats alignment/library/OSMOTIC_STRESS_T0_PE_REP1_T1.Lb.sorted.bam.idxstats
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/8d/fab2e91d3982f53aec292164986308/OSMOTIC_STRESS_T0_PE_REP1.plotFingerprint.raw.txt deeptools/OSMOTIC_STRESS_T0_PE_REP1.plotFingerprint.raw.txt
+    mkdir -p macs2/merged_replicate/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/d9/9690b8868fb524aed4258d4396d615/OSMOTIC_STRESS_T100_SE_peaks.FRiP_mqc.tsv macs2/merged_replicate/peaks/OSMOTIC_STRESS_T100_SE_peaks.FRiP_mqc.tsv
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/d0/985f89a1395d223fcf76f93124e8ae/OSMOTIC_STRESS_T100_SE_REP2_T1.Lb.sorted.bam.stats alignment/library/OSMOTIC_STRESS_T100_SE_REP2_T1.Lb.sorted.bam.stats
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/4a/28c4c0b5d40872388ecfa0d755b247/OSMOTIC_STRESS_T0_PE_REP2.mLb.mkD.sorted.bam.stats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T0_PE_REP2.mLb.mkD.sorted.bam.stats
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b4/cf84560d509e9388392f18b4e58a6c/OSMOTIC_STRESS_T150_SE_REP1_T2_fastqc.zip fastqc/OSMOTIC_STRESS_T150_SE_REP1_T2_fastqc.zip
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ef/3b3796c4ce5fb4246543f375028d25/OSMOTIC_STRESS_T100_SE_REP2.sorted.bam.flagstat alignment/merged_library/filtered/OSMOTIC_STRESS_T100_SE_REP2.sorted.bam.flagstat
+    mkdir -p alignment/merged_replicate && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/c4/3f7e57331e552e0f2c927ccee47f48/OSMOTIC_STRESS_T100_SE.sorted.bam.idxstats alignment/merged_replicate/OSMOTIC_STRESS_T100_SE.sorted.bam.idxstats
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/23/e220c808f053f75d9918bbf2b57d73/OSMOTIC_STRESS_T100_SE_REP2_T1.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T100_SE_REP2_T1.fastq.gz_trimming_report.txt
+    mkdir -p alignment/merged_replicate && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/77/1828a97307862c326c25d90e279ca1/OSMOTIC_STRESS_T100_SE.sorted.bam.stats alignment/merged_replicate/OSMOTIC_STRESS_T100_SE.sorted.bam.stats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/90/fd0b778e905e18d05f164cdbab08d3/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.quality_distribution_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.quality_distribution_metrics
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/90/fd0b778e905e18d05f164cdbab08d3/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.insert_size_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.insert_size_metrics
+    ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/c1/06eaca75686c012a632e1e1a3f1344/software_versions_mqc.yml software_versions_mqc.yml
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/a6/975661fdc0d520f7db0af3d01ba454/OSMOTIC_STRESS_T150_SE_REP1_T1.Lb.sorted.bam.idxstats alignment/library/OSMOTIC_STRESS_T150_SE_REP1_T1.Lb.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/unfiltered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/72/b7eeb544b883c4ba640b27ffda4c37/OSMOTIC_STRESS_T15_PE_REP1.mLb.mkD.sorted.MarkDuplicates.metrics.txt alignment/merged_library/unfiltered/picard_metrics/OSMOTIC_STRESS_T15_PE_REP1.mLb.mkD.sorted.MarkDuplicates.metrics.txt
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/73/554b09d31eb2d223a3cd5e2880d14b/OSMOTIC_STRESS_T100_SE_REP1.mLb.mkD.sorted.bam.stats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T100_SE_REP1.mLb.mkD.sorted.bam.stats
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ee/b3b96eaee4984ec6fa7da10c25298b/OSMOTIC_STRESS_T150_SE_REP1.mLb.mkD.sorted.bam.stats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T150_SE_REP1.mLb.mkD.sorted.bam.stats
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/1c/704bb878dba6388b72804fa441e662/OSMOTIC_STRESS_T0_PE_REP1_peaks.count_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T0_PE_REP1_peaks.count_mqc.tsv
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/40/8dd20986cf88f09578d1e68bcff05b/OSMOTIC_STRESS_T100_SE_REP1_T1.Lb.sorted.bam.idxstats alignment/library/OSMOTIC_STRESS_T100_SE_REP1_T1.Lb.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/unfiltered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/40/11b7b2dcee12515dc8d7fcfdc5cd79/OSMOTIC_STRESS_T0_PE_REP2.mLb.mkD.sorted.MarkDuplicates.metrics.txt alignment/merged_library/unfiltered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP2.mLb.mkD.sorted.MarkDuplicates.metrics.txt
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/a0/081e1bced2d9c73e39dd7d16bbb422/OSMOTIC_STRESS_T15_PE_REP1_T2_2_fastqc.zip fastqc/OSMOTIC_STRESS_T15_PE_REP1_T2_2_fastqc.zip
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/69/5ab531f19bafa9fe30ea03070e63c9/OSMOTIC_STRESS_T15_PE_REP1_T1_2_val_2_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T15_PE_REP1_T1_2_val_2_fastqc.zip
+    mkdir -p alignment/merged_library/unfiltered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/51/c8280b4227d0075e924b7a48a69993/OSMOTIC_STRESS_T0_PE_REP1.mLb.mkD.sorted.MarkDuplicates.metrics.txt alignment/merged_library/unfiltered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP1.mLb.mkD.sorted.MarkDuplicates.metrics.txt
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/52/665459797fe4319dbc6d6261dbc5e3/OSMOTIC_STRESS_T0_PE_REP2_T1_1_fastqc.zip fastqc/OSMOTIC_STRESS_T0_PE_REP2_T1_1_fastqc.zip
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b6/ca05d1dc41ced9771a3cf362b269d1/OSMOTIC_STRESS_T100_SE_REP1.CollectMultipleMetrics.base_distribution_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T100_SE_REP1.CollectMultipleMetrics.base_distribution_by_cycle_metrics
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/0e/0947ee2ea940209534786ca1e397e1/OSMOTIC_STRESS_T100_SE_REP1.sorted.bam.flagstat alignment/merged_library/filtered/OSMOTIC_STRESS_T100_SE_REP1.sorted.bam.flagstat
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/e0/b30fdb45e2b21729b9a1f6ce45b019/OSMOTIC_STRESS_T150_SE_REP1_T2.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T150_SE_REP1_T2.fastq.gz_trimming_report.txt
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/84/f8d600764c9f7cb410cd4b80509046/OSMOTIC_STRESS_T15_PE_REP1.sorted.bam.stats alignment/merged_library/filtered/OSMOTIC_STRESS_T15_PE_REP1.sorted.bam.stats
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/9f/1fe90a985f040eebbf7cda179868cf/OSMOTIC_STRESS_T100_SE_REP1.mLb.mkD.sorted.bam.flagstat alignment/merged_library/unfiltered/OSMOTIC_STRESS_T100_SE_REP1.mLb.mkD.sorted.bam.flagstat
+    mkdir -p trimgalore/fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/0d/aabb47c6dc624aceafe52175c245d1/OSMOTIC_STRESS_T0_PE_REP2_T1_1_val_1_fastqc.zip trimgalore/fastqc/OSMOTIC_STRESS_T0_PE_REP2_T1_1_val_1_fastqc.zip
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/96/228adaac6051c3777555d32581e94b/OSMOTIC_STRESS_T100_SE_REP2.mLb.mkD.sorted.bam.flagstat alignment/merged_library/unfiltered/OSMOTIC_STRESS_T100_SE_REP2.mLb.mkD.sorted.bam.flagstat
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/de/90ad26068fe4d7425c7cc48bbeceda/OSMOTIC_STRESS_T100_SE_REP1.plotFingerprint.raw.txt deeptools/OSMOTIC_STRESS_T100_SE_REP1.plotFingerprint.raw.txt
+    mkdir -p alignment/merged_replicate/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/41/6533b3012b369c91c42690201573f0/OSMOTIC_STRESS_T100_SE.sorted.MarkDuplicates.metrics.txt alignment/merged_replicate/picard_metrics/OSMOTIC_STRESS_T100_SE.sorted.MarkDuplicates.metrics.txt
+    mkdir -p fastqc && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/52/665459797fe4319dbc6d6261dbc5e3/OSMOTIC_STRESS_T0_PE_REP2_T1_2_fastqc.zip fastqc/OSMOTIC_STRESS_T0_PE_REP2_T1_2_fastqc.zip
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/9a/70bf18af661372e5257a13167558ba/OSMOTIC_STRESS_T150_SE_REP1_T2.Lb.sorted.bam.idxstats alignment/library/OSMOTIC_STRESS_T150_SE_REP1_T2.Lb.sorted.bam.idxstats
+    mkdir -p trimgalore && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/0d/aabb47c6dc624aceafe52175c245d1/OSMOTIC_STRESS_T0_PE_REP2_T1_2.fastq.gz_trimming_report.txt trimgalore/OSMOTIC_STRESS_T0_PE_REP2_T1_2.fastq.gz_trimming_report.txt
+    mkdir -p alignment/library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/ae/3d32e6a99cb5c18159f7c3d984d677/OSMOTIC_STRESS_T15_PE_REP1_T1.Lb.sorted.bam.flagstat alignment/library/OSMOTIC_STRESS_T15_PE_REP1_T1.Lb.sorted.bam.flagstat
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/01/c3ea52d39fa7832b3c121983e50707/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.base_distribution_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP1.CollectMultipleMetrics.base_distribution_by_cycle_metrics
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/e1/70a24f4cff12c4e5ad334b07025819/OSMOTIC_STRESS_T100_SE_REP2.mLb.mkD.sorted.bam.stats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T100_SE_REP2.mLb.mkD.sorted.bam.stats
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/91/9e7d6dc097264523e7eddf0ab7a27a/OSMOTIC_STRESS_T0_PE_REP2.plotFingerprint.raw.txt deeptools/OSMOTIC_STRESS_T0_PE_REP2.plotFingerprint.raw.txt
+    mkdir -p deseq2_library && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/76/9ed9807a7d76aea8ca01ffa1029487/consensus_peaks.sample.dists_mqc.tsv deseq2_library/consensus_peaks.sample.dists_mqc.tsv
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/90/fd0b778e905e18d05f164cdbab08d3/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.alignment_summary_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T0_PE_REP2.CollectMultipleMetrics.alignment_summary_metrics
+    mkdir -p alignment/merged_library/filtered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/39/b14c6d86bc131f1f811c3df250ae3a/OSMOTIC_STRESS_T150_SE_REP1.sorted.bam.stats alignment/merged_library/filtered/OSMOTIC_STRESS_T150_SE_REP1.sorted.bam.stats
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/83/c1d10d60e190feaa74a537c3b29264/OSMOTIC_STRESS_T150_SE_REP1.reference_point.plotProfile.tab deeptools/OSMOTIC_STRESS_T150_SE_REP1.reference_point.plotProfile.tab
+    mkdir -p macs2/merged_library/peaks && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/42/e70f15921b967c8d941f09e317bbad/OSMOTIC_STRESS_T0_PE_REP2_peaks.count_mqc.tsv macs2/merged_library/peaks/OSMOTIC_STRESS_T0_PE_REP2_peaks.count_mqc.tsv
+    mkdir -p deeptools && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/5c/30f39eed41c057c10c1ec5585a5d7e/OSMOTIC_STRESS_T0_PE_REP1.reference_point.plotProfile.tab deeptools/OSMOTIC_STRESS_T0_PE_REP1.reference_point.plotProfile.tab
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/1d/a2b790def4332cb0aaa3991c08cbb1/OSMOTIC_STRESS_T15_PE_REP1.mLb.mkD.sorted.bam.idxstats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T15_PE_REP1.mLb.mkD.sorted.bam.idxstats
+    mkdir -p alignment/merged_library/filtered/picard_metrics && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/dc/01b9417788568a907413654e91f34f/OSMOTIC_STRESS_T150_SE_REP1.CollectMultipleMetrics.quality_by_cycle_metrics alignment/merged_library/filtered/picard_metrics/OSMOTIC_STRESS_T150_SE_REP1.CollectMultipleMetrics.quality_by_cycle_metrics
+    mkdir -p alignment/merged_library/unfiltered && ln -s /home/leizheng/workspace/pipeline/ATAC-seq/work/b0/c0f9dc75eb66b8c47857c3543cb8c2/OSMOTIC_STRESS_T0_PE_REP2.mLb.mkD.sorted.bam.idxstats alignment/merged_library/unfiltered/OSMOTIC_STRESS_T0_PE_REP2.mLb.mkD.sorted.bam.idxstats
+}
+
+nxf_unstage() {
+    true
+    [[ ${nxf_main_ret:=0} != 0 ]] && return
+}
+
+nxf_main() {
+    trap on_exit EXIT
+    trap on_term TERM INT USR2
+    trap '' USR1
+
+    [[ "${NXF_CHDIR:-}" ]] && cd "$NXF_CHDIR"
+    export NXF_BOXID="nxf-$(dd bs=18 count=1 if=/dev/urandom 2>/dev/null | base64 | tr +/ 0A | tr -d '\r\n')"
+    NXF_SCRATCH=''
+    [[ $NXF_DEBUG > 0 ]] && nxf_env
+    touch /home/leizheng/workspace/pipeline/ATAC-seq/work/29/cd98173afae1d706adbb3b87093b93/.command.begin
+    set +u
+    set -u
+    [[ $NXF_SCRATCH ]] && cd $NXF_SCRATCH
+    export NXF_TASK_WORKDIR="$PWD"
+    nxf_stage
+
+    set +e
+    (set -o pipefail; (nxf_launch | tee .command.out) 3>&1 1>&2 2>&3 | tee .command.err) &
+    pid=$!
+    wait $pid || nxf_main_ret=$?
+    nxf_unstage
+}
+
+$NXF_ENTRY

@@ -1,0 +1,1 @@
+/home/leizheng/workspace/pipeline/ATAC-seq/work/49/1a8695ff1b230de5a239240940a622/genome.fa.autosomes.txt

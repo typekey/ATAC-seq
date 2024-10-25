@@ -1,0 +1,6 @@
+INFO:    Environment variable SINGULARITYENV_NXF_TASK_WORKDIR is set, but APPTAINERENV_NXF_TASK_WORKDIR is preferred
+INFO:    Environment variable SINGULARITYENV_NXF_DEBUG is set, but APPTAINERENV_NXF_DEBUG is preferred
+Using feature as id variables
+Using distance as id variables
+Using feature as id variables
+Using distance as id variables

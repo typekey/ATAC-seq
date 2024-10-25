@@ -1,0 +1,1 @@
+/home/leizheng/workspace/pipeline/ATAC-seq/work/95/1f004300f2129e1a3be55ad827124d/consensus_peaks.featureCounts.txt

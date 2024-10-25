@@ -1,0 +1,2 @@
+bwa/merged_replicate/bigwig/OSMOTIC_STRESS_T0_PE.bigWig	0,0,178
+bwa/merged_replicate/bigwig/OSMOTIC_STRESS_T100_SE.bigWig	0,0,178

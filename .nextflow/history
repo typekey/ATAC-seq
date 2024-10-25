@@ -1,0 +1,6 @@
+2024-10-25 12:25:36	-	disturbed_shaw	-	cd391b80c995976b921a6d3b566ff167	1292967d-0bae-441d-aa42-6e4d36609e92	nextflow run main.nf -profile test,singularity
+2024-10-25 12:26:20	-	romantic_snyder	-	cd391b80c995976b921a6d3b566ff167	1d77b15a-7315-431b-8a82-8460e4dc60ae	nextflow run main.nf -profile test,singularity --outdir project/test
+2024-10-25 12:27:09	-	chaotic_cori	-	cd391b80c995976b921a6d3b566ff167	331e2b97-9742-407e-8e15-d002b14b1667	nextflow run main.nf -profile test,singularity --outdir project/test
+2024-10-25 12:32:51	3m 44s	fabulous_volta	OK	cd391b80c995976b921a6d3b566ff167	f73b072c-80a4-444e-859b-f9b328b87f07	nextflow run main.nf -profile test,singularity --outdir project/test
+2024-10-25 13:20:08	4m 5s	infallible_wilson	OK	cd391b80c995976b921a6d3b566ff167	f46c49f0-358f-4580-a8bc-491617048ae8	nextflow run main.nf -profile test,singularity --outdir project/test
+2024-10-25 13:51:31	3m 36s	tender_jones	OK	cd391b80c995976b921a6d3b566ff167	a62780f0-010f-4ac1-b9c4-d0125fac1090	nextflow run main.nf -profile test,singularity --outdir project/test

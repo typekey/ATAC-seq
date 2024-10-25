@@ -1,0 +1,1 @@
+/home/leizheng/workspace/pipeline/ATAC-seq/work/18/4834ff9f5b3f641857d46ad6ad243c/OSMOTIC_STRESS_T0_PE.sorted.MarkDuplicates.metrics.txt

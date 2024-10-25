@@ -1,0 +1,1 @@
+/home/leizheng/workspace/pipeline/ATAC-seq/work/08/cbbd697d76029b23c0fa432a30e812/OSMOTIC_STRESS_T100_SE_REP2_peaks.annotatePeaks.txt

@@ -1,0 +1,1 @@
+/home/leizheng/workspace/pipeline/ATAC-seq/work/86/881867ac7362579889201fe6da9add/OSMOTIC_STRESS_T100_SE_REP1.FRiP.txt

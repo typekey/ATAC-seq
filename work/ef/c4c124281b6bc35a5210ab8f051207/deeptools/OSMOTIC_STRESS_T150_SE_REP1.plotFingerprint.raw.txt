@@ -1,0 +1,1 @@
+/home/leizheng/workspace/pipeline/ATAC-seq/work/f5/0cf899753913002e95a536e2786b23/OSMOTIC_STRESS_T150_SE_REP1.plotFingerprint.raw.txt

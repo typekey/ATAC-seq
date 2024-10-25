@@ -1,0 +1,39 @@
+INFO:    Environment variable SINGULARITYENV_NXF_TASK_WORKDIR is set, but APPTAINERENV_NXF_TASK_WORKDIR is preferred
+INFO:    Environment variable SINGULARITYENV_NXF_DEBUG is set, but APPTAINERENV_NXF_DEBUG is preferred
+INFO  @ Fri, 25 Oct 2024 13:21:11: 
+# Command line: callpeak --keep-dup all --nomodel --broad --broad-cutoff 0.1 --gsize 11624332 --format BAM --name OSMOTIC_STRESS_T150_SE_REP1 --treatment OSMOTIC_STRESS_T150_SE_REP1.sorted.bam
+# ARGUMENTS LIST:
+# name = OSMOTIC_STRESS_T150_SE_REP1
+# format = BAM
+# ChIP-seq file = ['OSMOTIC_STRESS_T150_SE_REP1.sorted.bam']
+# control file = None
+# effective genome size = 1.16e+07
+# band width = 300
+# model fold = [5, 50]
+# qvalue cutoff for narrow/strong regions = 5.00e-02
+# qvalue cutoff for broad/weak regions = 1.00e-01
+# The maximum gap between significant sites is assigned as the read length/tag size.
+# The minimum length of peaks is assigned as the predicted fragment length "d".
+# Larger dataset will be scaled towards smaller dataset.
+# Range for calculating regional lambda is: 10000 bps
+# Broad region calling is on
+# Paired-End mode is off
+ 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #1 read tag files... 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #1 read treatment tags... 
+INFO  @ Fri, 25 Oct 2024 13:21:11: 113952 reads have been read. 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #1 tag size is determined as 60 bps 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #1 tag size = 60.0 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #1  total tags in treatment: 113952 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #1 finished! 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #2 Build Peak Model... 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #2 Skipped... 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #2 Use 200 as fragment length 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #3 Call peaks... 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #3 Call broad peaks with given level1 -log10qvalue cutoff and level2: 1.301030, 1.000000... 
+INFO  @ Fri, 25 Oct 2024 13:21:11: #3 Pre-compute pvalue-qvalue table... 
+INFO  @ Fri, 25 Oct 2024 13:21:12: #3 Call peaks for each chromosome... 
+INFO  @ Fri, 25 Oct 2024 13:21:12: #4 Write output xls file... OSMOTIC_STRESS_T150_SE_REP1_peaks.xls 
+INFO  @ Fri, 25 Oct 2024 13:21:12: #4 Write broad peak in broadPeak format file... OSMOTIC_STRESS_T150_SE_REP1_peaks.broadPeak 
+INFO  @ Fri, 25 Oct 2024 13:21:12: #4 Write broad peak in bed12/gappedPeak format file... OSMOTIC_STRESS_T150_SE_REP1_peaks.gappedPeak 
+INFO  @ Fri, 25 Oct 2024 13:21:12: Done! 

@@ -1,0 +1,17 @@
+nextflow.trace/v2
+realtime=21000
+%cpu=1673
+cpu_model=Intel(R) Xeon(R) Platinum 8360Y CPU @ 2.40GHz
+rchar=273804904
+wchar=210356182
+syscr=54395
+syscw=37720
+read_bytes=0
+write_bytes=25436160
+%mem=0
+vmem=3458164
+rss=82944
+peak_vmem=3523704
+peak_rss=82944
+vol_ctxt=5914
+inv_ctxt=20

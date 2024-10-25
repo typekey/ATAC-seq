@@ -1,0 +1,1 @@
+/home/leizheng/workspace/pipeline/ATAC-seq/work/55/1deea9d3449dd39b1ff3e785b415f5/OSMOTIC_STRESS_T150_SE_REP1_T2.fastq.gz_trimming_report.txt
